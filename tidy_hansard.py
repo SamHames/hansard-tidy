@@ -75,7 +75,7 @@ def extract_speeches(transcript_id, transcript_xml):
 
                 title = subdebateinfo.find("title")
 
-                if title is not None:
+                if title:
                     debate_info[debate_info_level] = title.text
                 # Edge case for 'hansard80/hansards80/1979-04-05', '2021-08-10 00:00:00'
                 elif subdebateinfo.find("para") is not None:
@@ -89,7 +89,7 @@ def extract_speeches(transcript_id, transcript_xml):
         if parent.tag == "debate":
             # 2010-05-19 00:00:00 - no title for the debate
             title = parent.find("debateinfo").find("title")
-            if title is not None:
+            if title:
                 debate_info[0] = title.text
             else:
                 debate_info[0] = "debate"
@@ -99,7 +99,12 @@ def extract_speeches(transcript_id, transcript_xml):
         debate_row = (None, transcript_id, date, house, *debate_info)
         debates.add(debate_row)
         speeches.append(
-            [None, *debate_row[1:], speech_number, None, etree.tostring(speech)]
+            [
+                *debate_row,
+                speech_number,
+                None,
+                etree.tostring(speech, with_tail=False),
+            ]
         )
 
     return debates, speeches
@@ -139,7 +144,7 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
     create table speech (
         speech_id integer primary key,
         transcript_id references transcript on delete cascade,
-        debate_id references debate,
+        debate_id not null references debate,
         date,
         house,
         speech_number integer,
@@ -158,6 +163,8 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         interjection bool,
         primary key (speech_id, turn_number)
     );
+
+    pragma foreign_keys=1;
     """
 
     db_conn.executescript(schema_script)
@@ -200,27 +207,28 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
                     debate,
                 )
 
-            db_conn.executemany(
-                """
-                insert into speech values(
-                    ?1,
-                    ?2,
-                    (
-                        select
-                            debate_id
-                        from debate
-                        where (date, house, debate, subdebate_1, subdebate_2)=
-                            (?3, ?4, ?5, ?6, ?7)
-                    ),
-                    ?3,
-                    ?4,
-                    ?8,
-                    ?9,
-                    ?10
+            for speech in speeches:
+                db_conn.execute(
+                    """
+                    insert into speech values(
+                        ?1,
+                        ?2,
+                        (
+                            select
+                                debate_id
+                            from debate
+                            where (date, house, debate, subdebate_1, subdebate_2) =
+                                (?3, ?4, ?5, ?6, ?7)
+                        ),
+                        ?3,
+                        ?4,
+                        ?8,
+                        ?9,
+                        ?10
+                    )
+                    """,
+                    speech,
                 )
-                """,
-                speeches,
-            )
 
         db_conn.execute("commit")
 
