@@ -6,7 +6,7 @@ Hansard transcript files.
 
 Needed dependencies:
 
-pip install --upgrade lxml requests sitemapparser
+pip install --upgrade lxml requests site-map-parser
 
 Usage:
 
