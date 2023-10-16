@@ -58,7 +58,10 @@ def download_all_transcripts(
             xml_url,
             last_mod not null,
             -- The time the transcript was retrieved, null if not yet retrieved.
-            access_time
+            access_time,
+            -- The time the transcript was processed into the tidy schema.
+            -- Null indicates that the work is still outstanding.
+            process_time
         );
 
         create table if not exists metadata (
@@ -148,6 +151,11 @@ def download_all_transcripts(
         ((transcript, *details) for transcript, details in activity_latest.items()),
     )
 
+    # Note that the replace into here will delete and reinsert transcript
+    # rows - when we get to processing the full scripts, this will cause
+    # cascading deletes of out of date data extracted from these transcripts.
+    # TODO: Figure out what indexes we need to make this work effectively
+    # when we get to the incremental handling case.
     db.execute(
         """
         replace into transcript(transcript_id, last_mod, html_url)
