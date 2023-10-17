@@ -51,50 +51,59 @@ def extract_speeches(transcript_id, transcript_xml):
     # to do some grunt work to handle all of the edge cases though.
     for speech_number, speech in enumerate(root.xpath("//speech")):
         # First work out the debate this speech is part of.
-        debate_info = ["", "", ""]
+
+        # Defaults to handle various edge cases
+        # 'chamber/hansards/2007-05-10'
+        debate_info = [
+            "<untitled debate>",
+            "",
+            "",
+        ]
 
         parent = speech.getparent()
 
-        # Ascend the tree until we can fill in all of the details
+        # Ascend the tree until we can fill in all of the details Sometimes
+        # there can be interposing structure that obscures the debate, so we
+        # just walk up the tree until we hit the right elements.
         while parent.tag not in ("debate", "petition.group"):
             # Note that not all petitions have speeches associated -
             # some are presented as the text of the petition without
             # a member speaking to them. This structure only catches
             # the petitions that have speeches
-            if parent.tag in "petition":
+            if parent.tag == "petition":
                 debate_info[1] = parent.find("petitioninfo").find("title").text
 
             if parent.tag in ("subdebate.1", "subdebate.2"):
                 debate_info_level = 1 if parent.tag == "subdebate.1" else 2
 
-                subdebateinfo = parent.find("subdebateinfo")
-
                 # Edge case 'hansard80/hansardr80/1980-09-17', '2021-08-03 00:00:00'
-                if subdebateinfo is None:
+                if parent.find("subdebateinfo") is not None:
+                    subdebateinfo = parent.find("subdebateinfo")
+                elif parent.find("debateinfo") is not None:
                     subdebateinfo = parent.find("debateinfo")
 
                 title = subdebateinfo.find("title")
 
-                if title:
-                    debate_info[debate_info_level] = title.text
+                if title is not None:
+                    if title.text:
+                        debate_info[debate_info_level] = title.text
+                    else:
+                        debate_info[debate_info_level] = "<untitled sub-debate>"
                 # Edge case for 'hansard80/hansards80/1979-04-05', '2021-08-10 00:00:00'
                 elif subdebateinfo.find("para") is not None:
                     debate_info[debate_info_level] = subdebateinfo.find("para").text
-                # 'chamber/hansards/2007-05-10'
-                else:
-                    debate_info[debate_info_level] = "sub-debate"
 
             parent = parent.getparent()
 
         if parent.tag == "debate":
-            # 2010-05-19 00:00:00 - no title for the debate
             title = parent.find("debateinfo").find("title")
-            if title:
+            if title is not None and title.text:
                 debate_info[0] = title.text
-            else:
-                debate_info[0] = "debate"
         else:
             debate_info[0] = parent.find("petition.groupinfo").find("title").text
+
+        if None in debate_info:
+            breakpoint()
 
         debate_row = (None, transcript_id, date, house, *debate_info)
         debates.add(debate_row)
@@ -119,16 +128,19 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
     # We probably don't want to reprocess everything for a single new transcript.
     # TODO: add indexes to support common queries and incremental updates.
     schema_script = """
-    pragma foreign_keys=0;
+    pragma foreign_keys=1;
 
+    drop table if exists speech_turn;
+    drop table if exists speech;
     drop table if exists speaker;
+    drop table if exists debate;
+
     create table speaker (
         -- Hansard data assigned
         speaker_id primary key
         -- TODO: what else goes here?
     );
 
-    drop table if exists debate;
     create table debate (
         debate_id integer primary key,
         transcript_id references transcript on delete cascade,
@@ -140,7 +152,6 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         unique (date, house, debate, subdebate_1, subdebate_2)
     );
 
-    drop table if exists speech;
     create table speech (
         speech_id integer primary key,
         transcript_id references transcript on delete cascade,
@@ -153,7 +164,6 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         unique(date, house, speech_number)
     );
 
-    drop table if exists speech_turn;
     create table speech_turn (
         speech_id integer references speech on delete cascade,
         turn_number integer,
@@ -164,7 +174,6 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         primary key (speech_id, turn_number)
     );
 
-    pragma foreign_keys=1;
     """
 
     db_conn.executescript(schema_script)
