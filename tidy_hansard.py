@@ -10,6 +10,7 @@ Usage:
 python tidy_hansard.py
 
 """
+from datetime import datetime
 import sqlite3
 import zipfile
 
@@ -119,9 +120,23 @@ def extract_speeches(transcript_id, transcript_xml):
     return debates, speeches
 
 
-def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.zip"):
+def tidy_hansard(
+    db_path="hansard.db",
+    transcript_zip_path="hansard_transcripts.zip",
+    rebuild=True,
+):
     db_conn = sqlite3.connect(db_path, isolation_level=None)
 
+    if rebuild:
+        db_conn.executescript(
+            """
+            drop table if exists speech_turn;
+            drop table if exists speech;
+            drop table if exists speaker;
+            drop table if exists debate;
+            update transcript set process_time = null;
+            """
+        )
     # TODO: how do we handle changes in schema?
     # Drop and replace everything probably?
     # TODO: how do we handle incremental updates?
@@ -130,18 +145,13 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
     schema_script = """
     pragma foreign_keys=1;
 
-    drop table if exists speech_turn;
-    drop table if exists speech;
-    drop table if exists speaker;
-    drop table if exists debate;
-
-    create table speaker (
+    create table if not exists speaker (
         -- Hansard data assigned
         speaker_id primary key
         -- TODO: what else goes here?
     );
 
-    create table debate (
+    create table if not exists debate (
         debate_id integer primary key,
         transcript_id references transcript on delete cascade,
         date,
@@ -152,7 +162,9 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         unique (date, house, debate, subdebate_1, subdebate_2)
     );
 
-    create table speech (
+    create index if not exists transcript_debate on debate(transcript_id);
+
+    create table if not exists speech (
         speech_id integer primary key,
         transcript_id references transcript on delete cascade,
         debate_id not null references debate,
@@ -164,7 +176,10 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         unique(date, house, speech_number)
     );
 
-    create table speech_turn (
+    create index if not exists transcript_speech on speech(transcript_id);
+    create index if not exists debate_speech on speech(debate_id);
+
+    create table if not exists speech_turn (
         speech_id integer references speech on delete cascade,
         turn_number integer,
         speaker_id,
@@ -173,10 +188,26 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
         interjection bool,
         primary key (speech_id, turn_number)
     );
-
     """
 
     db_conn.executescript(schema_script)
+
+    db_conn.execute("begin")
+
+    # Delete outdated transcript rows by following the foreign key
+    # relationships
+    db_conn.execute(
+        """
+        -- A replace is a delete followed by an insert - the delete
+        -- triggers the foreign key cascade.
+        replace into transcript
+        select *
+        from transcript
+        where xml_url is not null
+            and access_time is not null
+            and process_time is null
+        """
+    )
 
     to_process = list(
         db_conn.execute(
@@ -186,15 +217,12 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
             from transcript
             where xml_url is not null
                 and access_time is not null
+                and process_time is null
             """
         )
     )
 
     with zipfile.ZipFile(transcript_zip_path, "r") as transcripts:
-        all_paths = set()
-
-        db_conn.execute("begin")
-
         for i, (transcript_id, last_mod) in enumerate(to_process):
             # Skip the senate transcript duplicated into the HoR.
             # TODO: double check if there's actually a HoR sitting for that day?
@@ -239,13 +267,18 @@ def tidy_hansard(db_path="hansard.db", transcript_zip_path="hansard_transcripts.
                     speech,
                 )
 
-        db_conn.execute("commit")
+            db_conn.execute(
+                "update transcript set process_time = ? where transcript_id = ?",
+                [datetime.now(), transcript_id],
+            )
 
-        for path in sorted(all_paths):
-            print(path)
-
+    db_conn.execute("commit")
     db_conn.close()
 
 
 if __name__ == "__main__":
-    tidy_hansard()
+    import sys
+
+    args = sys.argv[1:]
+    rebuild = "rebuild" in args
+    tidy_hansard(rebuild=rebuild)

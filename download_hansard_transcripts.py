@@ -39,7 +39,8 @@ def download_all_transcripts(
 
     db.executescript(
         """
-        pragma foreign_keys=1;
+        -- This part of the process shouldn't affect already processed data.
+        pragma foreign_keys=0;
         pragma journal_mode=WAL;
 
         create table if not exists transcript (
@@ -94,7 +95,10 @@ def download_all_transcripts(
     activity_latest = dict()
     prev_lastmod = datetime.now()
 
-    for sitemap in all_maps:
+    print("Checking sitemaps for updated transcripts.")
+
+    for i, sitemap in enumerate(all_maps):
+        print(f"{sitemap} - {i+1} / up to {len(all_maps)}")
         subsite = SiteMapParser(sitemap)
         subsite_urls = list(subsite.get_urls())
 
@@ -196,8 +200,8 @@ def download_all_transcripts(
     with zipfile.ZipFile(
         transcript_zip_path, "a", zipfile.ZIP_DEFLATED
     ) as transcript_zip:
-        for transcript_id, lastmod, url in to_download:
-            print(transcript_id)
+        for i, (transcript_id, lastmod, url) in enumerate(to_download):
+            print(f"Downloading {transcript_id}, {i+1}/{len(to_download)}")
             response = session.get(url)
             response.raise_for_status()
             transcript_page = html.fromstring(response.content)
