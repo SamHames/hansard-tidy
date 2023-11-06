@@ -51,3 +51,49 @@ for record in json_data:
 
 # Close the database connection
 conn.close()
+
+
+
+"""
+Proposed DB schema for hansard project
+
+# role
+# role_id
+# role_name: member, minister, etc
+
+
+# speaker role
+# speaker_role_id (primary key)
+# speaker_id (foreign key linking speaker)
+# role_id (foreign key linking role)
+# start date for each role
+# end date for each role
+many to many relationship
+
+
+# subdebate
+# subdebate_id (primary key)
+# speech_id (foreign key linking to speech)
+# title
+# type e.g legislation, question time, etc
+
+  
+# subdebate text
+# text_id (primary key)
+# subdebdate_id (foreign key linking to subdebate)
+# plain_text
+
+
+# parliament_session
+# session_id (primary key)
+# parliament_no
+# session_no
+# date
+
+
+# parliament_member (information on all members of the nth parliament)
+# could be moved to another file? not sure how the process would work
+# member_id (primary key)
+# session_id (foreign key linking to session_id)
+# roles etc
+"""
