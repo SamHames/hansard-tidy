@@ -1,5 +1,6 @@
 """
-Prepare data live from parlinfo website.
+Find all transcripts of the Proceedings of Federal Parliament using live data
+from parlinfo website.
 
 Running this script will download and prepare an up to date index of all
 Hansard transcript files.
@@ -11,6 +12,11 @@ pip install --upgrade lxml requests site-map-parser
 Usage:
 
 python download_hansard_transcripts.py
+
+This is inspired by Tim Sherratt's Glam Workbench materials on Hansard [1].
+
+[1] Sherratt, Tim. (2019). GLAM-Workbench/australian-commonwealth-hansard
+(v0.1.0). Zenodo. https://doi.org/10.5281/zenodo.3544706
 
 """
 
@@ -41,7 +47,6 @@ def download_all_transcripts(
         """
         -- This part of the process shouldn't affect already processed data.
         pragma foreign_keys=0;
-        pragma journal_mode=WAL;
 
         create table if not exists transcript (
             /*
@@ -156,10 +161,8 @@ def download_all_transcripts(
     )
 
     # Note that the replace into here will delete and reinsert transcript
-    # rows - when we get to processing the full scripts, this will cause
-    # cascading deletes of out of date data extracted from these transcripts.
-    # TODO: Figure out what indexes we need to make this work effectively
-    # when we get to the incremental handling case.
+    # rows, but because foreign_keys are off won't otherwise change any other
+    # table.
     db.execute(
         """
         replace into transcript(transcript_id, last_mod, html_url)
