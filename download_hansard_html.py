@@ -8,7 +8,7 @@ We use the HTML transcripts for this instead of the XML transcripts because:
 
 Needed dependencies:
 
-pip install --upgrade lxml requests site-map-parser
+pip install --upgrade lxml requests
 
 Usage:
 
@@ -25,14 +25,37 @@ import zipfile
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from sitemapparser import SiteMapParser
-
+from lxml import etree
 
 session = requests.Session()
-retries = Retry(total=30, backoff_factor=1, backoff_max=60)
+retries = Retry(
+    total=5, backoff_factor=1, backoff_max=60, status_forcelist=[500, 502, 503, 504]
+)
 
 session.mount("http://", HTTPAdapter(max_retries=retries))
 session.mount("https://", HTTPAdapter(max_retries=retries))
+
+
+def get_sitemap_urls(sitemap_loc):
+    sitemap_ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    request = session.get(sitemap_loc)
+    sitemap_map = etree.fromstring(request.content)
+
+    return [
+        (elem.find(sitemap_ns + "loc").text, elem.find(sitemap_ns + "lastmod").text)
+        for elem in sitemap_map.findall(sitemap_ns + "sitemap")
+    ]
+
+
+def get_location_urls(sitemap_url):
+    sitemap_ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    request = session.get(sitemap_url)
+    sitemap_map = etree.fromstring(request.content)
+
+    return [
+        (elem.find(sitemap_ns + "loc").text, elem.find(sitemap_ns + "lastmod").text)
+        for elem in sitemap_map.findall(sitemap_ns + "url")
+    ]
 
 
 def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip"):
@@ -74,67 +97,48 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             value
         );
 
-        insert or ignore into metadata values('last-run', '1899-01-01 00:00:00')
+        insert or ignore into metadata values('last-run', julianday('1899-01-01'));
 
         """
     )
 
-    # We overshoot by quite a bit, just to make sure we don't have to worry
-    # about boundary effects.
-    check_until = datetime.fromisoformat(
-        list(db.execute("select value from metadata where key = 'last-run'"))[0][0]
-    ) - timedelta(weeks=4)
+    # Only update the list of URLs every 24 hours.
+    time_since_last_sitemap_check = list(
+        db.execute(
+            "select julianday('now') - value from metadata where key = 'last-run'"
+        )
+    )[0][0]
 
-    # Part 1: Generate the index of all siting days, by the date they were last modified.
-    sm = SiteMapParser("https://parlinfo.aph.gov.au/sitemap/sitemapindex.xml")
+    if time_since_last_sitemap_check > 1:
+        all_sitemaps = get_sitemap_urls(
+            "https://parlinfo.aph.gov.au/sitemap/sitemapindex.xml"
+        )
 
-    # Reversed, because we want to check the most recently update sitemap first so
-    # we can terminate early if needed. Only the first complete run of this
-    # should be intensive.
-    all_maps = list(reversed(list(sm.get_sitemaps())))
+        print("Checking sitemaps for updated fragments.")
+        db.execute("begin")
 
-    # The sitemap URLs all point to specific fragments of each proceedings. We're
-    # aiming to find the fragments with the latest modification date, as a proxy
-    # for the sitting days that have been updated since the latest run.
-    activity_latest = dict()
-    prev_lastmod = datetime.now()
+        # Note that we check all sitemaps, because otherwise we can't tell
+        # if urls have been deleted from the global list.
+        for i, (sitemap, _) in enumerate(all_sitemaps):
+            print(f"{sitemap} - {i+1} / up to {len(all_sitemaps)}")
 
-    print("Checking sitemaps for updated fragments.")
+            # Process all subsites, so we can confirm if a fragment is deleted.
+            subsite_urls = get_location_urls(sitemap)
+            hansard_urls = [
+                (loc, lastmod) for loc, lastmod in subsite_urls if "hansard" in loc
+            ]
 
-    for i, sitemap in enumerate(all_maps):
-        print(f"{sitemap} - {i+1} / up to {len(all_maps)}")
-        attempts = 0
-        while True:
-            try:
-                subsite = SiteMapParser(sitemap)
-                break
-            except Exception:
-                delay = min(60, 2**attempts)
-                print(f"Caught exception, retrying in {delay}")
-                time.sleep(delay)
-                attempts += 1
+            # Mark updated hansard URLs
+            db.executemany("insert into active_proceedings values (?, ?)", hansard_urls)
 
-                if attempts >= 30:
-                    raise
-
-        subsite_urls = list(subsite.get_urls())
-
-        # Confirm that we are processing sitemaps in descending order of lastmod.
-        # If this isn't true the early termination check won't work...
-        lastmod = min(url.lastmod for url in subsite_urls)
-        assert lastmod <= prev_lastmod
-        prev_lastmod = lastmod
-
-        if lastmod < check_until:
-            break
-
-        hansard_urls = [
-            (url.loc, url.lastmod) for url in subsite.get_urls() if "hansard" in url.loc
-        ]
-
-        # Mark updated hansard URLs
-        db.execute("delete from active_proceedings")
-        db.executemany("insert into active_proceedings values (?, ?)", hansard_urls)
+        # 1. Handle deleted pages
+        db.execute(
+            """
+            delete from proceedings_page
+            where url not in (select url from active_proceedings)
+            """
+        )
+        # 2. Mark updated pages for retrieval
         db.execute(
             """
             replace into proceedings_page(page_id, url, last_mod)
@@ -149,12 +153,8 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             """
         )
 
-    # Note that the replace into here will delete and reinsert transcript
-    # rows, but because foreign_keys are off won't otherwise change any other
-    # table.
-    db.execute(
-        "replace into metadata values('last-run', (select max(last_mod) from proceedings_page))"
-    )
+        db.execute("replace into metadata values('last-run', julianday('now')")
+        db.execute("commit")
 
     # Note - we're back in autocommit mode, as we'll be doing infrequent single
     # row updates to track files as they're updated.
@@ -179,8 +179,12 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             destination = f"{page_id}/{last_mod}"
 
             print(f"Downloading {url} into {destination}, {i+1}/{len(to_download)}")
-            response = session.get(url, timeout=5)
-            response.raise_for_status()
+            try:
+                response = session.get(url, timeout=5)
+                response.raise_for_status()
+            except Exception:
+                print(f"Skipping {url} due to error")
+                continue
 
             html_zip.writestr(
                 destination,
@@ -196,9 +200,9 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
                 [datetime.now(tz=timezone.utc), url],
             )
 
-            # Make no more than 2 requests per second.
+            # Make no more than 4 requests per second.
             taken = time.monotonic() - start
-            delay = max(0.5 - taken, 0)
+            delay = max(0.25 - taken, 0)
             wait = time.sleep(delay)
 
     db.close()
