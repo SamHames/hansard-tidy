@@ -21,7 +21,7 @@ from datetime import datetime, timezone, timedelta
 import sqlite3
 import time
 import urllib.parse
-import zipfile
+import zlib
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -29,7 +29,11 @@ from lxml import etree
 
 session = requests.Session()
 retries = Retry(
-    total=5, backoff_factor=1, backoff_max=60, status_forcelist=[500, 502, 503, 504]
+    total=5,
+    backoff_factor=1,
+    backoff_max=90,
+    status_forcelist=[500, 502, 503, 504],
+    backoff_jitter=10,
 )
 
 session.mount("http://", HTTPAdapter(max_retries=retries))
@@ -83,8 +87,12 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             access_time,
             -- The time the transcript was processed into the tidy schema.
             -- Null indicates that the work is still outstanding.
-            process_time
+            process_time,
+            -- The downloaded HTML of this page, compressed with zlib.
+            compressed_page
         );
+
+        create index if not exists proceedings_access on proceedings_page(access_time);
 
         -- Used for finding updated HTML fragments.
         create temporary table active_proceedings(
@@ -97,7 +105,7 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             value
         );
 
-        insert or ignore into metadata values('last-run', julianday('1899-01-01'));
+        insert or ignore into metadata values('last-run', 0);
 
         """
     )
@@ -138,7 +146,7 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             where url not in (select url from active_proceedings)
             """
         )
-        # 2. Mark updated pages for retrieval
+        # 2. Mark new and updated pages for retrieval
         db.execute(
             """
             replace into proceedings_page(page_id, url, last_mod)
@@ -153,32 +161,34 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             """
         )
 
-        db.execute("replace into metadata values('last-run', julianday('now')")
+        db.execute("replace into metadata values('last-run', julianday('now'))")
         db.execute("commit")
 
-    # Note - we're back in autocommit mode, as we'll be doing infrequent single
-    # row updates to track files as they're updated.
-    to_download = list(
-        db.execute(
-            """
-            select
-                page_id,
-                url,
-                last_mod
-            from proceedings_page
-            where access_time is null
-            """
+    # If an entry times out, skip and move on. Run this as a while loop until
+    # we've collected all outstanding pages.
+    while True:
+        # Note - we're back in autocommit mode, as we'll be doing infrequent single
+        # row updates to track files as they're updated.
+        to_download = list(
+            db.execute(
+                """
+                select
+                    page_id,
+                    url,
+                    last_mod
+                from proceedings_page
+                where access_time is null
+                """
+            )
         )
-    )
 
-    # TODO: work out how to handle rebuilding the zip file with only the current
-    # versions of transcripts.
-    with zipfile.ZipFile(html_zip_path, "a", zipfile.ZIP_DEFLATED) as html_zip:
+        if not to_download:
+            break
+
         for i, (page_id, url, last_mod) in enumerate(to_download):
             start = time.monotonic()
-            destination = f"{page_id}/{last_mod}"
 
-            print(f"Downloading {url} into {destination}, {i+1}/{len(to_download)}")
+            print(f"Downloading {url}, {i+1}/{len(to_download)}")
             try:
                 response = session.get(url, timeout=5)
                 response.raise_for_status()
@@ -186,18 +196,16 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
                 print(f"Skipping {url} due to error")
                 continue
 
-            html_zip.writestr(
-                destination,
-                response.text,
-            )
+            compressed_page = zlib.compress(response.content, level=9)
 
             db.execute(
                 """
                 update proceedings_page set
-                    access_time = ?
+                    access_time = ?,
+                    compressed_page = ?
                 where url = ?
                 """,
-                [datetime.now(tz=timezone.utc), url],
+                [datetime.now(tz=timezone.utc), compressed_page, url],
             )
 
             # Make no more than 4 requests per second.
