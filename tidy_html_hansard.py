@@ -73,7 +73,7 @@ def extract_page_data(url, access_time, compressed_page):
         root.make_links_absolute("https://parlinfo.aph.gov.au")
 
         content_comp = root.xpath("//div[@id='documentContentPanel']")
-        content = html.tostring(content_comp[0])
+        content = html.tostring(content_comp[0], with_tail=False, encoding="unicode")
 
         metadata_block = root.xpath("//div[@class='metadata']")[0]
 
@@ -135,7 +135,7 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
     failures = 0
     futures = set()
 
-    with cf.ProcessPoolExecutor() as pool:
+    with cf.ProcessPoolExecutor(4) as pool:
         for row in tqdm(
             db_conn.execute(
                 """
@@ -143,11 +143,13 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
                     url, access_time, compressed_page
                 from collected.proceedings_page
                 where access_time is not null
+                order by url
                 """
             ),
             total=to_process,
+            smoothing=0.0,
         ):
-            if random.random() < 1.1:
+            if random.random() <= 1.0:
                 futures.add(pool.submit(extract_page_data, *row))
 
             if len(futures) >= 1000:
