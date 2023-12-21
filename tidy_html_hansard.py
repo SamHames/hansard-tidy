@@ -111,7 +111,7 @@ def insert_data(db_conn, result):
             "insert into main.failed_processing_page values (?, ?)",
             (url, access_time),
         )
-        failures += 1
+
     else:
         # Make sure debate row exists
         row_meta = [
@@ -124,7 +124,7 @@ def insert_data(db_conn, result):
             ]
         ]
         db_conn.execute(
-            "insert or ignore into debate values(?, ?, ?, ?, ?)",
+            "insert or ignore into main.debate values(?, ?, ?, ?, ?)",
             (
                 None,
                 *row_meta,
@@ -141,7 +141,7 @@ def insert_data(db_conn, result):
         ]
         debate_id = list(
             db_conn.execute(
-                "select debate_id from debate where (date, house, title) = (?, ?, ?)",
+                "select debate_id from main.debate where (date, house, title) = (?, ?, ?)",
                 row_meta,
             )
         )[0][0]
@@ -163,7 +163,7 @@ def insert_data(db_conn, result):
 
         # All metadata for reference.
         db_conn.executemany(
-            "insert into metadata values (?, ?, ?)",
+            "insert into main.metadata values (?, ?, ?)",
             ((page_id, key, value) for key, value in metadata.items()),
         )
 
@@ -197,36 +197,36 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard2.db"):
         )
     )[0][0]
 
-    completed = 0
-    failures = 0
     futures = set()
+    pbar = tqdm(
+        total=to_process,
+        smoothing=0.01,
+    )
 
     with cf.ProcessPoolExecutor() as pool:
-        for row in tqdm(
-            db_conn.execute(
-                """
-                select
-                    url, access_time, compressed_page
-                from collected.proceedings_page
-                where access_time is not null
-                order by url
-                """
-            ),
-            total=to_process,
-            smoothing=0.01,
+        for row in db_conn.execute(
+            """
+            select
+                url, access_time, compressed_page
+            from collected.proceedings_page
+            where access_time is not null
+            """,
         ):
-            if random.random() <= 1.0:
-                futures.add(pool.submit(extract_page_data, *row))
+            futures.add(pool.submit(extract_page_data, *row))
 
             if len(futures) >= 1000:
                 done, futures = cf.wait(futures, return_when="FIRST_COMPLETED")
 
                 for future in done:
-                    result = future.result()
-                    insert_data(db_conn, result)
+                    insert_data(db_conn, future.result())
+
+                pbar.update(len(done))
 
         for future in cf.as_completed(futures):
-            insert_data(db_conn, result)
+            insert_data(db_conn, future.result())
+
+        pbar.update(len(futures))
+        pbar.close()
 
     db_conn.execute("commit")
 
