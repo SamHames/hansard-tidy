@@ -102,7 +102,73 @@ def extract_page_data(url, access_time, compressed_page):
     return url, access_time, metadata, content
 
 
-def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
+def insert_data(db_conn, result):
+    url, access_time = result[:2]
+    metadata, content = result[2:]
+
+    if content is None:
+        db_conn.execute(
+            "insert into main.failed_processing_page values (?, ?)",
+            (url, access_time),
+        )
+        failures += 1
+    else:
+        # Make sure debate row exists
+        row_meta = [
+            metadata[key]
+            for key in [
+                "Date",
+                "Database",
+                "Parl No.",
+                "Title",
+            ]
+        ]
+        db_conn.execute(
+            "insert or ignore into debate values(?, ?, ?, ?, ?)",
+            (
+                None,
+                *row_meta,
+            ),
+        )
+
+        row_meta = [
+            metadata[key]
+            for key in [
+                "Date",
+                "Database",
+                "Title",
+            ]
+        ]
+        debate_id = list(
+            db_conn.execute(
+                "select debate_id from debate where (date, house, title) = (?, ?, ?)",
+                row_meta,
+            )
+        )[0][0]
+
+        # Speech content
+        row_meta = [
+            metadata[key]
+            for key in [
+                "Date",
+                "Database",
+                "Parl No.",
+            ]
+        ]
+        db_conn.execute(
+            "insert into main.proceedings_page values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (None, url, access_time, *row_meta, debate_id, content),
+        )
+        page_id = list(db_conn.execute("select last_insert_rowid()"))[0][0]
+
+        # All metadata for reference.
+        db_conn.executemany(
+            "insert into metadata values (?, ?, ?)",
+            ((page_id, key, value) for key, value in metadata.items()),
+        )
+
+
+def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard2.db"):
     """ """
 
     if os.path.exists(target_db):
@@ -135,7 +201,7 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
     failures = 0
     futures = set()
 
-    with cf.ProcessPoolExecutor(4) as pool:
+    with cf.ProcessPoolExecutor() as pool:
         for row in tqdm(
             db_conn.execute(
                 """
@@ -147,7 +213,7 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
                 """
             ),
             total=to_process,
-            smoothing=0.0,
+            smoothing=0.01,
         ):
             if random.random() <= 1.0:
                 futures.add(pool.submit(extract_page_data, *row))
@@ -156,85 +222,11 @@ def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
                 done, futures = cf.wait(futures, return_when="FIRST_COMPLETED")
 
                 for future in done:
-                    try:
-                        result = future.result()
-                        url, access_time = result[:2]
-                        metadata, content = result[2:]
-
-                        if content is None:
-                            db_conn.execute(
-                                "insert into main.failed_processing_page values (?, ?)",
-                                (url, access_time),
-                            )
-                            failures += 1
-                        else:
-                            # Make sure debate row exists
-                            row_meta = [
-                                metadata[key]
-                                for key in [
-                                    "Date",
-                                    "Database",
-                                    "Parl No.",
-                                    "Title",
-                                ]
-                            ]
-                            db_conn.execute(
-                                "insert or ignore into debate values(?, ?, ?, ?, ?)",
-                                (
-                                    None,
-                                    *row_meta,
-                                ),
-                            )
-
-                            row_meta = [
-                                metadata[key]
-                                for key in [
-                                    "Date",
-                                    "Database",
-                                    "Title",
-                                ]
-                            ]
-                            debate_id = list(
-                                db_conn.execute(
-                                    "select debate_id from debate where (date, house, title) = (?, ?, ?)",
-                                    row_meta,
-                                )
-                            )[0][0]
-
-                            # Speech content
-                            row_meta = [
-                                metadata[key]
-                                for key in [
-                                    "Date",
-                                    "Database",
-                                    "Parl No.",
-                                ]
-                            ]
-                            db_conn.execute(
-                                "insert into main.proceedings_page values (?, ?, ?, ?, ?, ?, ?, ?)",
-                                (None, url, access_time, *row_meta, debate_id, content),
-                            )
-                            page_id = list(
-                                db_conn.execute("select last_insert_rowid()")
-                            )[0][0]
-
-                            # All metadata for reference.
-                            db_conn.executemany(
-                                "insert into metadata values (?, ?, ?)",
-                                (
-                                    (page_id, key, value)
-                                    for key, value in metadata.items()
-                                ),
-                            )
-
-                    except Exception as e:
-                        print(e)
-
-                batch_completed = len(done)
-                completed += batch_completed
+                    result = future.result()
+                    insert_data(db_conn, result)
 
         for future in cf.as_completed(futures):
-            metadata = future.result()
+            insert_data(db_conn, result)
 
     db_conn.execute("commit")
 
