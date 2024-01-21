@@ -23,21 +23,34 @@ import time
 import urllib.parse
 import zlib
 
+from lxml import etree
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from lxml import etree
+
+
+def wait_a_bit(request_start, seconds_per_request=7.51):
+    taken = time.monotonic() - request_start
+    delay = max(seconds_per_request - taken, 0)
+    time.sleep(delay)
+
 
 session = requests.Session()
 retries = Retry(
-    total=5,
+    total=10,
     backoff_factor=1,
-    backoff_max=90,
+    backoff_max=300,
     status_forcelist=[500, 502, 503, 504],
-    backoff_jitter=10,
+    backoff_jitter=20,
 )
 
 session.mount("http://", HTTPAdapter(max_retries=retries))
 session.mount("https://", HTTPAdapter(max_retries=retries))
+
+session.headers.update(
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0"
+    }
+)
 
 
 def get_sitemap_urls(sitemap_loc):
@@ -85,9 +98,6 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             last_mod not null,
             -- The time the transcript was retrieved, null if not yet retrieved.
             access_time,
-            -- The time the transcript was processed into the tidy schema.
-            -- Null indicates that the work is still outstanding.
-            process_time,
             -- The downloaded HTML of this page, compressed with zlib.
             compressed_page
         );
@@ -110,7 +120,8 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
         """
     )
 
-    # Only update the list of URLs every 24 hours.
+    # Periodically update the list of pages using the sitemap, but only
+    # if not done within the last 24 hours.
     time_since_last_sitemap_check = list(
         db.execute(
             "select julianday('now') - value from metadata where key = 'last-run'"
@@ -146,14 +157,18 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
             where url not in (select url from active_proceedings)
             """
         )
-        # 2. Mark new and updated pages for retrieval
+
+        # 2. Mark updated pages for retrieval, but keep the previously
+        # downloaded version available.
         db.execute(
             """
-            replace into proceedings_page(page_id, url, last_mod)
+            replace into proceedings_page(page_id, url, last_mod, access_time, compressed_page)
             select
                 pp.page_id,
                 ap.url,
-                ap.last_mod
+                ap.last_mod,
+                pp.access_time,
+                pp.compressed_page
             from active_proceedings ap
             left outer join proceedings_page pp using(url)
             where pp.last_mod is null
@@ -164,8 +179,6 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
         db.execute("replace into metadata values('last-run', julianday('now'))")
         db.execute("commit")
 
-    # If an entry times out, skip and move on. Run this as a while loop until
-    # we've collected all outstanding pages.
     while True:
         # Note - we're back in autocommit mode, as we'll be doing infrequent single
         # row updates to track files as they're updated.
@@ -177,7 +190,12 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
                     url,
                     last_mod
                 from proceedings_page
-                where access_time is null
+                where access_time is null or
+                    access_time < last_mod
+                -- Retrieve in order of new pages, then
+                -- the least recently accessed of the
+                -- updated pages.
+                order by coalesce(access_time, '1900-01-01')
                 """
             )
         )
@@ -185,15 +203,26 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
         if not to_download:
             break
 
-        for i, (page_id, url, last_mod) in enumerate(to_download):
-            start = time.monotonic()
+        # Note: one errors we just move on, but the while loop won't exit until
+        # all pages are successfully retrieved.
+        last_start = 0
+        tries = 0
 
+        for i, (page_id, url, last_mod) in enumerate(to_download):
             print(f"Downloading {url}, {i+1}/{len(to_download)}")
+
+            wait_a_bit(last_start)
+
+            last_start = time.monotonic()
+
+            # We retry up to 10 ten times, but if there's a failure ultimately
+            # we just move on - the loop will repeat if necessary to retry
+            # failed pages.
             try:
-                response = session.get(url, timeout=5)
+                response = session.get(url, timeout=10)
                 response.raise_for_status()
-            except Exception:
-                print(f"Skipping {url} due to error")
+            except Exception as e:
+                print(f"Skipping {url} due to error: {e}")
                 continue
 
             compressed_page = zlib.compress(response.content, level=9)
@@ -208,10 +237,7 @@ def download_all_html(db_path="hansard_html.db", html_zip_path="hansard_html.zip
                 [datetime.now(tz=timezone.utc), compressed_page, url],
             )
 
-            # Make no more than 4 requests per second.
-            taken = time.monotonic() - start
-            delay = max(0.25 - taken, 0)
-            wait = time.sleep(delay)
+            tries = 0
 
     db.close()
 

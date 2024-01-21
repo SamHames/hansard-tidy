@@ -42,7 +42,7 @@ schema_statements = [
         house text not null,
         parl_no integer not null,
         debate_id integer references debate not null,
-        speech_html text not null
+        page_html text not null
     )
     """,
     """
@@ -146,7 +146,7 @@ def insert_data(db_conn, result):
             )
         )[0][0]
 
-        # Speech content
+        # Page content
         row_meta = [
             metadata[key]
             for key in [
@@ -168,7 +168,7 @@ def insert_data(db_conn, result):
         )
 
 
-def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard2.db"):
+def tidy_hansard(source_db="hansard_html.db", target_db="tidy_hansard.db"):
     """ """
 
     if os.path.exists(target_db):
